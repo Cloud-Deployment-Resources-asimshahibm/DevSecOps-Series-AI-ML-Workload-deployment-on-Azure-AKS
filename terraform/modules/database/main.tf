@@ -53,6 +53,8 @@ variable "app_databases" {
   default = ["jupyterhub", "argo_workflows"]
 }
 
+variable "log_analytics_id" { type = string }
+
 variable "tags" { type = map(string) }
 
 resource "random_password" "admin" {
@@ -111,10 +113,27 @@ resource "azurerm_postgresql_flexible_server_configuration" "require_secure_tran
   value     = "on"
 }
 
-resource "azurerm_postgresql_flexible_server_configuration" "log_connections" {
-  name      = "log_connections"
+resource "azurerm_postgresql_flexible_server_configuration" "logging" {
+  for_each = {
+    log_connections              = "on"
+    log_disconnections           = "on"
+    log_checkpoints              = "on"
+    "connection_throttle.enable" = "on"
+  }
+  name      = each.key
   server_id = azurerm_postgresql_flexible_server.this.id
-  value     = "on"
+  value     = each.value
+}
+
+resource "azurerm_monitor_diagnostic_setting" "postgres" {
+  name                           = "audit"
+  target_resource_id             = azurerm_postgresql_flexible_server.this.id
+  log_analytics_workspace_id     = var.log_analytics_id
+  log_analytics_destination_type = "Dedicated"
+
+  enabled_log {
+    category = "PostgreSQLLogs"
+  }
 }
 
 # ------------------------------------------------------------------------------

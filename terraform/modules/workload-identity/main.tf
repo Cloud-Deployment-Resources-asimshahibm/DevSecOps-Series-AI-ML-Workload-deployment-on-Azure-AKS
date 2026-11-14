@@ -13,6 +13,8 @@
 #  loki              monitoring:loki                                     loki rw
 #  grafana           monitoring:kube-prometheus-stack-grafana            Monitoring Reader (Azure Monitor datasource)
 #  external-secrets  external-secrets:external-secrets                   Key Vault Secrets User
+#  image-verifier    kyverno:kyverno-admission-controller,              AcrPull (cosign signatures, image scans)
+#                    trivy-system:trivy-operator
 #
 # Pods opt in with the label azure.workload.identity/use: "true"; the service
 # account carries azure.workload.identity/client-id (rendered by Argo CD from
@@ -26,6 +28,7 @@ variable "oidc_issuer_url" { type = string }
 variable "container_ids" { type = map(string) } # data, models, artifacts, loki
 variable "key_vault_id" { type = string }
 variable "monitoring_scope" { type = string } # resource group id(s) Grafana may read metrics from
+variable "acr_id" { type = string }
 variable "tags" { type = map(string) }
 
 locals {
@@ -59,6 +62,10 @@ locals {
     }
     external-secrets = {
       sas   = ["external-secrets:external-secrets"]
+      roles = {}
+    }
+    image-verifier = {
+      sas   = ["kyverno:kyverno-admission-controller", "trivy-system:trivy-operator"]
       roles = {}
     }
   }
@@ -128,6 +135,13 @@ resource "azurerm_role_assignment" "grafana" {
   scope                = var.monitoring_scope
   role_definition_name = "Monitoring Reader"
   principal_id         = azurerm_user_assigned_identity.this["grafana"].principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+resource "azurerm_role_assignment" "image_verifier" {
+  scope                = var.acr_id
+  role_definition_name = "AcrPull"
+  principal_id         = azurerm_user_assigned_identity.this["image-verifier"].principal_id
   principal_type       = "ServicePrincipal"
 }
 

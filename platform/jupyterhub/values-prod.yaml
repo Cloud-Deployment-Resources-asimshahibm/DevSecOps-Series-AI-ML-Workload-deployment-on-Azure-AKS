@@ -3,7 +3,8 @@ hub:
     GitHubOAuthenticator:
       oauth_callback_url: https://jupyter.ml.example.com/hub/oauth_callback   # <- your domain
 
-# Exposed through the Application Gateway (AGIC). Point a DNS CNAME for your
+# Exposed through the Application Gateway (AGIC). The gateway's WAF policy
+# (OWASP CRS, bot protection, rate limit) applies to every listener. Point a DNS CNAME for your
 # host at the gateway (terraform output app_gateway_fqdn) and provide the TLS
 # certificate as a Kubernetes secret (cert-manager / your PKI).
 ingress:

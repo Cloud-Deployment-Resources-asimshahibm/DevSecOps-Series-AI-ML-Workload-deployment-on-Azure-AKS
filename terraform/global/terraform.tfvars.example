@@ -3,9 +3,24 @@ location        = "eastus2"
 project         = "aiml"
 
 github_org  = "Cloud-Deployment-Resources-asimshahibm"
-github_repo = "DevOps-Series-AI-ML-Workload-deployment-on-Azure-AKS"
+github_repo = "DevSecOps-Series-AI-ML-Workload-deployment-on-Azure-AKS"
 
-acr_sku = "Standard"
+acr_sku = "Premium"
 
 # e.g. ["platform-team@example.com"]
 billing_alert_emails = []
+
+# Defender for Cloud alerts (security operations mailbox)
+security_contact_email = ""
+
+# Turn off what your organization already manages centrally (management group policy / landing zone)
+security_services = {
+  defender_containers = true
+  defender_storage    = true
+  defender_keyvault   = true
+  defender_databases  = true
+  defender_arm        = true
+  defender_cspm       = true
+  cis_policy          = true
+  activity_log        = true
+}

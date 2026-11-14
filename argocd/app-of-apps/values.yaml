@@ -1,6 +1,19 @@
 env: dev
-project: ml-platform
-repoURL: https://github.com/Cloud-Deployment-Resources-asimshahibm/DevOps-Series-AI-ML-Workload-deployment-on-Azure-AKS.git
+project: ml-platform          # default project for platform components
+
+# Argo CD projects (least privilege). ML workloads cannot create cluster-scoped
+# resources or deploy outside the ML namespaces, even if their chart is altered.
+projects:
+  ml-platform:
+    description: Platform components (operators, observability, security)
+    destinations: ["*"]
+    clusterResources: true
+  ml-workloads:
+    description: ML workloads (inference, pipelines, Ray) — namespaced only
+    destinations: [ml-serving, ml-training, ray]
+    clusterResources: false
+    syncWindows: []
+repoURL: https://github.com/Cloud-Deployment-Resources-asimshahibm/DevSecOps-Series-AI-ML-Workload-deployment-on-Azure-AKS.git
 revision: main
 
 # Azure facts that Git cannot know (generated client ids, globally unique names).
@@ -18,6 +31,7 @@ cloud:
   clusterName: aiml-dev
   aksSubnetId: /subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/aiml-dev-rg/providers/Microsoft.Network/virtualNetworks/aiml-dev-vnet/subnets/snet-aks
   vnetCidr: 10.10.0.0/16
+  appGatewaySubnetCidr: 10.10.16.0/24
   storageAccount: aimldevdataexample
   blobEndpoint: https://aimldevdataexample.blob.core.windows.net/
   keyVaultName: aiml-dev-kv-example
@@ -33,6 +47,7 @@ cloud:
     loki: 00000000-0000-0000-0000-000000000015
     grafana: 00000000-0000-0000-0000-000000000016
     external-secrets: 00000000-0000-0000-0000-000000000017
+    image-verifier: 00000000-0000-0000-0000-000000000018
 
 # Every component of the platform. Three kinds:
 #   chart:      third-party Helm chart + our values from Git ($values/<values>/values[-env].yaml)
@@ -54,6 +69,57 @@ apps:
     path: charts/karpenter-nodepools
     cloudValues: |
       subnetId: {{ .Values.cloud.aksSubnetId }}
+
+  # ------------------------------------------------------------- security (DevSecOps)
+  kyverno:
+    enabled: true
+    wave: -30
+    namespace: kyverno
+    chart: { repo: https://kyverno.github.io/kyverno/, name: kyverno, version: 3.9.2 }
+    values: platform/kyverno
+    syncOptions: ["ServerSideApply=true"]
+    # ACR access for cosign signature verification (Workload ID, AcrPull)
+    cloudValues: |
+      admissionController:
+        rbac:
+          serviceAccount:
+            annotations:
+              azure.workload.identity/client-id: {{ index .Values.cloud.clientIds "image-verifier" }}
+
+  security-policies:
+    enabled: true
+    wave: -28
+    namespace: kyverno
+    path: charts/security-policies
+    cloudValues: |
+      registry: {{ .Values.cloud.acrLoginServer }}
+
+  policy-reporter:
+    enabled: true
+    wave: -10
+    namespace: kyverno
+    chart: { repo: https://kyverno.github.io/policy-reporter, name: policy-reporter, version: 3.11.2 }
+    values: platform/policy-reporter
+
+  falco:
+    enabled: true
+    wave: -10
+    namespace: falco
+    chart: { repo: https://falcosecurity.github.io/charts, name: falco, version: 9.2.2 }
+    values: platform/falco
+
+  trivy-operator:
+    enabled: true
+    wave: -10
+    namespace: trivy-system
+    chart: { repo: https://aquasecurity.github.io/helm-charts/, name: trivy-operator, version: 0.33.0 }
+    values: platform/trivy-operator
+    syncOptions: ["ServerSideApply=true"]
+    # scan jobs pull images from ACR with Workload ID (AcrPull)
+    cloudValues: |
+      serviceAccount:
+        annotations:
+          azure.workload.identity/client-id: {{ index .Values.cloud.clientIds "image-verifier" }}
 
   external-secrets:
     enabled: true
@@ -204,6 +270,7 @@ apps:
   ray-cluster:
     enabled: true
     wave: 0
+    project: ml-workloads
     namespace: ray
     path: charts/ray-cluster
     cloudValues: |
@@ -215,6 +282,7 @@ apps:
   ml-pipelines:
     enabled: true
     wave: 0
+    project: ml-workloads
     namespace: ml-training
     path: charts/ml-pipelines
     cloudValues: |
@@ -232,6 +300,7 @@ apps:
   ml-inference:
     enabled: true
     wave: 0
+    project: ml-workloads
     namespace: ml-serving
     path: charts/ml-inference
     cloudValues: |
@@ -241,3 +310,6 @@ apps:
         storeUri: az://{{ .Values.cloud.storageAccount }}/models
       serviceAccount:
         clientId: {{ index .Values.cloud.clientIds "ml-inference" }}
+      security:
+        networkPolicy:
+          ingressCidr: {{ .Values.cloud.appGatewaySubnetCidr }}

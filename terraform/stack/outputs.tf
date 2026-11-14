@@ -51,3 +51,7 @@ output "log_analytics_workspace_id" {
 output "budgets" {
   value = module.cost_guardrails.budget_names
 }
+
+output "waf_policy_id" {
+  value = module.waf.id
+}

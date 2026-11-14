@@ -91,3 +91,17 @@ kubectl get events -A --field-selector source=karpenter   # node auto-provisioni
 | RayJob never starts | `kubectl -n ray get rayjobs,pods`; KubeRay operator logs; worker resources fit the NodePool SKUs |
 | `ModuleNotFoundError: trainer` in Ray | Ray image tag in `charts/ray-cluster/values-<env>.yaml` must be a built tag, not `bootstrap` |
 | Pickle / sklearn version warning | training and inference requirements must pin identical scikit-learn/joblib/numpy |
+
+## Security (DevSecOps)
+
+| Symptom | Fix |
+|---|---|
+| Every ML pod rejected: `verify-ml-image-signatures` | image not signed by `build-and-deploy.yml@refs/heads/main` of *this* repo (fork/rename → update `signing.subject`), or Kyverno cannot read ACR: admission-controller pod lacks `AZURE_FEDERATED_TOKEN_FILE` / `image-verifier` lacks AcrPull |
+| `restrict-image-registries` denies a platform sidecar | add the registry to `extraTrustedRegistries` in `charts/security-policies/values.yaml` (reviewed PR) |
+| Trivy Operator reports `UNAUTHORIZED` pulling from ACR | scan-job pods need the Workload ID label (`trivyOperator.scanJobPodTemplateLabels`) and the `trivy-operator` SA client-id annotation |
+| `terraform plan` fails in CI: conftest deny | read the message — e.g. prod needs `api_server_authorized_ip_ranges`; fix the tfvars, don't weaken `policy/terraform` |
+| WAF blocks legitimate prediction batches (403) | `AGWFirewallLogs` → rule id; raise `waf.max_body_kb` or add a scoped exclusion in `terraform/modules/waf`; use `mode = "Detection"` in dev while tuning |
+| AKS create fails: `KMS ... key vault` | `aks` identity needs *Key Vault Crypto User* (Terraform grants it) and the key must be enabled; Key Vault public access must stay on for public-mode KMS |
+| `EncryptionAtHost` errors on node creation | feature not registered for the subscription (runbook Phase 0.2) or the VM SKU does not support it |
+| Defender plan apply conflicts (`409`) | plans are applied sequentially; re-run the apply |
+| Inference returns 401 for every call | `ml-inference-api-keys` secret synced? `kubectl -n ml-serving get externalsecret`; header name is `x-api-key` |

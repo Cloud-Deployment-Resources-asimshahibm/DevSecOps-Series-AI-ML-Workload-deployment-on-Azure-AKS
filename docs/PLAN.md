@@ -1,4 +1,4 @@
-# High-Level Plan — AI/ML Workload Platform on Azure AKS
+# High-Level Plan — AI/ML Workload Platform on Azure AKS (DevSecOps edition)
 
 ## 1. Objective
 
@@ -83,16 +83,22 @@ platform, same GitOps layout, same ML code, Azure-native building blocks.
 ## 3. Delivery flow
 
 ```
- PR ──► ci.yml (ruff, pytest, tf validate/tflint, helm lint + kubeconform via render-chart.sh, checkov, trivy)
-   └──► terraform.yml  plan dev+prod (identity aiml-gha-tf-plan) → PR comment
-merge ─► terraform.yml  apply dev (prod: manual dispatch + Environment approval, identity aiml-gha-tf-apply)
-     └► build-and-deploy.yml  build 3 images → Trivy (CRITICAL fails) → ACR (+SBOM, provenance)
-                              → commit new tag to charts/*/values-dev.yaml
-                              → Argo CD (dev) syncs  ml-inference · ml-pipelines · ray-cluster
+ PR ──► ci.yml        secrets(gitleaks) · SAST(Semgrep+Bandit) · SCA(pip-audit+OSV, dependency review)
+   │                  IaC(Checkov+Trivy) · Kyverno CLI on rendered charts · zizmor+actionlint · hadolint
+   │                  unit + model-security tests · tf validate/tflint · conftest verify · helm lint + kubeconform
+   ├──► codeql.yml    CodeQL (Python, Actions)
+   └──► terraform.yml plan dev+prod (aiml-gha-tf-plan) → OPA/Conftest + Checkov on the plan JSON → PR comment
+merge ─► terraform.yml  apply dev (prod: manual dispatch + Environment approval; plan re-checked by OPA)
+     └► build-and-deploy.yml  build (local) → Trivy + Grype gates → push to ACR → SBOM → cosign sign
+                              → SBOM attestation + SLSA provenance → verify → pin tag+DIGEST in values-dev.yaml
+                              → Argo CD (dev) syncs → Kyverno verifies signature at admission (ACR via Workload ID)
+                              → dast.yml: OWASP ZAP against dev (through the WAF)
 run-training-pipeline.yml / nightly CronWorkflow
-     → Argo Workflow: validate-data → Ray Tune (RayJob) → train → quality gate → [approval] → promote
-     → az://<account>/models/<name>/latest.json updated → inference replicas hot-reload (no redeploy)
-promote-prod.yml → PR copying tags to values-prod.yaml → review + merge → Argo CD (prod) syncs
+     → Argo Workflow: validate-data → Ray Tune (RayJob) → train (sha256) → quality gate
+                      → model-security-scan (ModelScan) → [approval] → promote (requires passing scan)
+     → az://<account>/models/<name>/latest.json updated → inference re-verifies digest + scan, then hot-reloads
+promote-prod.yml → verify signatures + provenance + fresh Trivy + last DAST → PR copying DIGESTS
+                   to values-prod.yaml → CODEOWNERS review + merge → Argo CD (prod) syncs in change window
 ```
 
 **Rollback paths**
@@ -104,17 +110,30 @@ promote-prod.yml → PR copying tags to values-prod.yaml → review + merge → 
 | Bad infra change | `git revert` → `terraform.yml` plan/apply |
 | Platform component upgrade | revert chart version bump in `argocd/app-of-apps/values.yaml` |
 
-## 4. Security model
+## 4. Security model (DevSecOps)
+
+Security is a gate at **every stage**. The full matrix is in [DEVSECOPS.md](DEVSECOPS.md).
+
+| Stage | Controls |
+|---|---|
+| Plan | OPA/Conftest (azurerm rules, unit-tested) + Checkov on the Terraform plan; hardened, audited state |
+| Code | gitleaks, Semgrep (+ ML rules), Bandit, CodeQL, pip-audit, OSV, dependency review, Checkov, Trivy config, Kyverno CLI, zizmor, actionlint |
+| Build | hadolint; Trivy + Grype must pass **before** push; non-root slim images; hardened runners |
+| Test | model-security unit tests; ModelScan + SHA-256 in the pipeline; ZAP DAST on dev |
+| Release | SBOM, cosign keyless signature, SBOM attestation, SLSA provenance in ACR Premium, verification before CD and before prod |
+| Deploy | Kyverno (signatures, digests, registries, pod security, limits, host access), PSA, Azure Policy (PSS audit), Cilium NetworkPolicies, Argo CD projects + sync windows, App Gateway WAF_v2, AKS KMS (HSM key), encryption at host, API keys |
+| Operate | Falco, Trivy Operator, model re-verification on load, Defender for Containers / Storage / Key Vault / PostgreSQL / ARM, Defender CSPM + CIS Azure 2.0, audit logs in Log Analytics |
+| Monitor | Security Posture dashboard, security alerts with playbooks, Defender secure score + alerts, authorized-traffic SLO, remediation SLAs |
+
+Baseline principles:
 
 - **No long-lived credentials**: GitHub → Azure via OIDC federated credentials; pods → Azure via Workload ID; humans via Entra ID (kubelogin) — AKS local accounts disabled, ACR admin user disabled, storage shared keys disabled.
-- **Least privilege**: CI can push to ACR and *only* create Workflows in `ml-training` (AKS Cluster User + one RoleBinding); `terraform plan` gets a custom read-only cluster role; inference can only *read* the `models` container; Loki only its container; External Secrets only *Key Vault Secrets User* on its vault.
-- **Encryption**: platform-managed keys at rest everywhere (Storage, Disks, PostgreSQL, Key Vault); TLS 1.2+ enforced on Storage, PostgreSQL (`require_secure_transport`) and the gateway SSL policy.
-- **Network**: nodes and PostgreSQL have no public IPs; PostgreSQL is private-access only; Storage/Key Vault/ACR traffic uses service endpoints and the storage firewall admits only the AKS subnet; the Application Gateway is the only ingress; API server authorized IP ranges in prod; Cilium NetworkPolicies.
-- **Supply chain**: immutable SHA tags, Trivy gate, SBOM + provenance attestations, Checkov on IaC, gitleaks pre-commit.
-- **Runtime**: non-root containers, read-only root FS, dropped capabilities, seccomp RuntimeDefault, AzureLinux node image, JupyterHub NetworkPolicy.
-- **Audit**: AKS control-plane + audit logs and Key Vault audit events in Log Analytics.
-
-The DevSecOps edition of this series adds security gates at every pipeline stage on top of this baseline (signed images, admission control, Defender for Cloud, WAF, …).
+- **Least privilege**: CI can push to ACR and *only* create Workflows in `ml-training`; `terraform plan` gets a custom read-only cluster role; inference can only *read* the `models` container; Kyverno/Trivy get AcrPull only; External Secrets only *Key Vault Secrets User*; Terraform never grants Owner (OPA).
+- **Encryption**: Kubernetes Secrets with an HSM-backed Key Vault key (KMS); encryption at host for node disks/caches; storage double encryption; TLS 1.2+ everywhere.
+- **Network**: private PostgreSQL; storage firewall (AKS subnet only); NSGs on gateway, PostgreSQL and endpoint subnets; the WAF_v2 gateway is the only ingress; API server authorized IP ranges (OPA-enforced in prod); Cilium NetworkPolicies.
+- **Supply chain**: SHA tags + digests pinned in Git, signed and attested images, admission-time verification, SLSA provenance checked before prod.
+- **Runtime**: non-root containers, read-only root FS, dropped capabilities, seccomp RuntimeDefault, no service-account token where not needed, AzureLinux node image, Falco + Defender sensor.
+- **Audit**: Activity Log, AKS audit, Key Vault, blob, PostgreSQL and WAF logs in Log Analytics.
 
 ## 5. Observability model
 
@@ -149,7 +168,9 @@ Other alerts shipped: 5xx ratio < 5 % (critical), p95 latency < 500 ms (warning)
 | M5 | Observability | dashboards populated (incl. Cost & Billing, Performance, SLO), test alert reaches receiver, logs searchable in Loki + Kibana, budgets created | 0.5 day |
 | M6 | Users | JupyterHub GitHub login, CPU + GPU notebook launch, Ray from notebook | 0.5 day |
 | M7 | prod | prod stack applied with approval, promote PR merged, smoke test green | 1 day |
-| M8 | Hardening | DNS + TLS, API IP lock-down, Alertmanager receivers, backups/restore tested | 1–2 days |
+| M3S | 🔐 Security setup | code-security features + branch protection with all gates required; first build signed + attested; Defender plans on | 0.5 day |
+| M5S | 🔐 Security validation | WAF blocks probes; Kyverno rejects unsigned/`latest`/root pods; Falco + integrity alerts fire on demand; KMS on; DAST green; Defender alerts visible | 0.5 day |
+| M8 | Hardening | DNS + TLS, API IP lock-down (required by OPA for prod), self-hosted runners + Key Vault/storage firewall Deny, Alertmanager receivers, backups/restore tested, harden-runner `egress-policy: block` | 1–2 days |
 
 ## 7. Cost guide (eastus2, pay-as-you-go list prices, rounded — check the Azure pricing calculator)
 
@@ -159,13 +180,14 @@ Other alerts shipped: 5xx ratio < 5 % (critical), p95 latency < 500 ms (warning)
 | System pool 2 × Standard_D4ds_v5 | ≈ $330/mo | 3 in prod |
 | NAP CPU (≈ 2 × D4s_v5 Spot avg) | ≈ $60–120/mo | consolidates when idle |
 | GPU Standard_NC4as_T4_v3 | ≈ $0.53/h **only while used** | scale-to-zero |
-| Application Gateway Standard_v2 | ≈ $180/mo + capacity units | the biggest fixed cost after nodes |
+| Application Gateway **WAF_v2** | ≈ $325/mo + capacity units | the biggest fixed cost after nodes |
 | Standard Load Balancer (egress) + public IPs | ≈ $25/mo + data | |
 | PostgreSQL B_Standard_B2s + 32 GiB | ≈ $30/mo | prod GP D4ds_v5 + HA ≈ $650/mo |
 | Azure Files NFS Premium | ≈ $16/mo per 100 GiB share | **each RWX PVC is at least 100 GiB** (homes, shared, Ray scratch) |
-| Blob, Key Vault, ACR Standard ($20/mo) | usage-based | |
+| Blob, Key Vault Premium (HSM key ≈ $1/mo + ops), ACR Premium ($50/mo) | usage-based | |
+| Defender for Cloud | Containers ≈ $7/vCore/mo · Storage ≈ $10/account/mo + malware scanning per GB · Key Vault, ARM, OSS DB, CSPM per resource | per subscription; check the Defender pricing page |
 | Log Analytics | ≈ $2.30/GB ingested | dev daily cap 5 GB |
-| **dev baseline** | **≈ $700–850/mo** | destroy with `make destroy ENV=dev` when not in use |
+| **dev baseline** | **≈ $900–1,100/mo** | destroy with `make destroy ENV=dev` when not in use |
 
 ## 8. Risks & mitigations
 
@@ -177,5 +199,9 @@ Other alerts shipped: 5xx ratio < 5 % (critical), p95 latency < 500 ms (warning)
 | Chart upgrades breaking CRDs | pinned versions, ServerSideApply, upgrade in dev first via PR |
 | Model/library skew | identical sklearn/joblib pins in training + inference; versioned metadata |
 | Cost runaway | NodePool limits, JupyterHub culling, GPU consolidation, GPU-idle + unallocated-GPU alerts, projection-over-budget alert, Cost Management budgets + anomaly alert |
-| Secrets leakage | ESO + Key Vault only; gitleaks; no secrets in values files; no keys anywhere (Workload ID, OIDC) |
+| Secrets leakage | ESO + Key Vault only; gitleaks on full history + GitHub push protection; Trivy secret scan in images; KMS-encrypted etcd; no keys anywhere (Workload ID, OIDC) |
+| Malicious / tampered model | ModelScan + SHA-256 in pipeline; promotion requires passing scan; re-verification on load; blob write audit logs; Defender for Storage malware scanning |
+| Compromised dependency or image | pinned deps, pip-audit/OSV/Dependabot, two image scanners + Defender VA, signatures + provenance verified at admission and before prod |
+| Policy blocks a legitimate deploy | same Kyverno policies run in CI first; documented exceptions process (DEVSECOPS.md §5); Audit mode for `resourceLimits` in dev |
+| Security tooling noise / alert fatigue | blocking only on fixable HIGH/CRITICAL; WAF Detection mode while tuning; severity-based routing; time-boxed ignores with owners |
 | Role-assignment propagation delays (RBAC eventual consistency) | idempotent re-apply; documented in the runbook |

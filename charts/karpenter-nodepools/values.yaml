@@ -11,6 +11,10 @@ costTags:
 # + container toolkit on GPU SKUs; the GPU operator adds the device plugin + DCGM.
 imageFamily: AzureLinux
 
+# DevSecOps: encrypt temp disks / caches / OS-disk data flows on the host
+# (requires: az feature register --namespace Microsoft.Compute --name EncryptionAtHost)
+encryptionAtHost: true
+
 cpu:
   capacityTypes: ["spot", "on-demand"]
   skuFamilies: ["D", "E", "F"]          # general purpose, memory, compute

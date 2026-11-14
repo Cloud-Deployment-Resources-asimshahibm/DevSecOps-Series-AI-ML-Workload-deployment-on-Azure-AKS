@@ -1,7 +1,7 @@
 """Pictorial (icon-based) architecture diagram for the README.
 
 Hand-placed layout (no auto-layout) so the picture stays readable. Uses the
-official AWS architecture icons and project logos stored in ./icons.
+official Azure architecture icons (diagrams package) and project logos stored in ./icons.
 
 Regenerate:
     pip install playwright && playwright install chromium   # once
@@ -23,8 +23,8 @@ PNG_OUT = HERE.parent / "architecture-pictorial.png"
 W, H = 1920, 1400
 ICON = 54
 
-TITLE = "DevOps-Series (AI/ML Workload Deployment on Kubernetes — AWS-EKS and Azure-AKS Platforms)"
-SUBTITLE = "Azure-AKS implementation · Terraform · GitHub Actions (OIDC) · Argo CD + Helm · node auto-provisioning CPU/GPU · Workload ID · JupyterHub · Argo Workflows · KubeRay · Prometheus · Grafana · Loki · ELK · OpenCost · SLOs"
+TITLE = "DevSecOps-Series (AI/ML Workload Deployment on Kubernetes — AWS-EKS and Azure-AKS Platforms)"
+SUBTITLE = "Azure-AKS implementation · security at every stage (docs/devsecops-pipeline.png) · Terraform · GitHub Actions (OIDC) · Argo CD + Helm · node auto-provisioning CPU/GPU · Workload ID · JupyterHub · Argo Workflows · KubeRay · Prometheus · Grafana · Loki · ELK · OpenCost · SLOs"
 
 # ----------------------------------------------------------------------------- groups
 # (x, y, w, h, title, border, fill, title_color)
@@ -49,21 +49,21 @@ GROUPS = [
 NODES = {
     "repo": (136, 150, "github.png", "Git monorepo\nIaC · charts · GitOps · ML"),
     "gha": (136, 262, "github-actions.png", "GitHub Actions\nCI · build · promote · train"),
-    "trivy": (136, 374, "trivy.png", "Trivy · Checkov\nimage + IaC scans"),
+    "trivy": (136, 374, "trivy.png", "Security gates\nSAST·SCA·IaC·sign·SBOM"),
     "tf": (136, 486, "terraform.png", "Terraform (azurerm)\nplan on PR · gated apply"),
     "users": (136, 670, "users.png", "ML engineers\n& API clients"),
     # shared services
     "ecr": (380, 168, "az-acr.png", "Container Registry\nAcrPull via kubelet ID"),
     "iam": (520, 168, "az-managed-identity.png", "Entra ID · OIDC\nWorkload ID identities"),
-    "kms": (650, 168, "az-entra.png", "Azure RBAC\nfor Kubernetes"),
-    "sm": (775, 168, "az-key-vault.png", "Key Vault (RBAC)\nPostgres · OAuth · Grafana"),
+    "kms": (650, 168, "az-defender.png", "Defender for Cloud\nCSPM · workloads"),
+    "sm": (775, 168, "az-key-vault.png", "Key Vault Premium\nHSM key · secrets"),
     "sqs": (905, 168, "az-log-analytics.png", "Log Analytics\naudit · control plane"),
     # billing
     "cw": (1450, 168, "az-monitor.png", "Azure Monitor\nGrafana datasource"),
     "budgets": (1600, 168, "az-cost-budgets.png", "Budgets\n80% · 100% · forecast"),
     "ce": (1760, 168, "az-cost-analysis.png", "Cost analysis\nanomaly alert · tags"),
     # vpc edge
-    "alb": (420, 318, "az-app-gateway.png", "Application Gateway v2\nAGIC ingress · TLS"),
+    "alb": (420, 318, "az-waf.png", "App Gateway WAF_v2\nAGIC · DRS 2.1 · bots"),
     "nat": (1300, 318, "az-load-balancer.png", "Standard LB\negress"),
     "vpce": (1450, 318, "az-service-endpoint.png", "Service endpoints\nStorage · Key Vault · ACR"),
     # system
@@ -112,11 +112,11 @@ EDGES = [
     ([(136, 211), (136, 233)], "ci", None, None),
     ([(136, 323), (136, 345)], "ci", None, None),
     ([(108, 262), (52, 262), (52, 486), (105, 486)], "ci", None, None),
-    # images -> ECR
+    # images -> ACR
     ([(166, 374), (258, 374), (258, 244), (380, 244), (380, 230)], "ci", "② push images (OIDC)", (264, 300)),
     # Git -> Argo CD (pull)
     ([(166, 150), (270, 150), (270, 505), (386, 505)], "gitops", "③ Argo CD pulls Git", (276, 462)),
-    # Terraform -> EKS
+    # Terraform -> AKS
     ([(166, 486), (290, 486), (290, 742), (451, 742)], "ci", "① terraform apply", (176, 500)),
     # Argo CD -> Helm -> workloads / observability
     ([(444, 505), (516, 505)], "gitops", None, None),
@@ -125,7 +125,7 @@ EDGES = [
     # Karpenter -> nodes
     ([(574, 640), (656, 640), (656, 515), (676, 515)], "cap", "provisions", (586, 630)),
     ([(545, 703), (545, 780), (1132, 780), (1132, 540), (1191, 540)], "cap", "provisions GPU VMs (from 0)", (860, 772)),
-    # ESO -> Secrets Manager
+    # ESO -> Key Vault
     ([(386, 640), (356, 640), (356, 384), (775, 384), (775, 232)], "data", "ExternalSecrets (Workload ID)", (630, 377)),
     # Users -> ALB -> api / hub
     ([(166, 670), (304, 670), (304, 318), (391, 318)], "req", "④ HTTPS", (180, 660)),
@@ -138,7 +138,7 @@ EDGES = [
     # models to/from S3
     ([(770, 652), (770, 605), (930, 605), (930, 410), (1700, 410), (1700, 455), (1750, 455)], "data", "⑥ register / promote model", (1200, 402)),
     ([(874, 515), (900, 515), (900, 422), (1712, 422), (1712, 480), (1750, 480)], "data", "⑦ hot-reload latest.json", (1200, 436)),
-    # EKS -> EFS / RDS
+    # AKS -> Azure Files / PostgreSQL
     ([(1640, 640), (1750, 640)], "data", "RWX", (1655, 630)),
     ([(1640, 800), (1750, 800)], "data", "state", (1655, 790)),
     # telemetry

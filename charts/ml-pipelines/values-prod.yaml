@@ -3,8 +3,10 @@ env: prod
 images:
   training:
     tag: "bootstrap"
+    digest: ""
   ray:
     tag: "bootstrap"
+    digest: ""
 
 model:
   minAccuracy: "0.90"

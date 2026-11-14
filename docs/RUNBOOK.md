@@ -1,8 +1,13 @@
-# Runbook — Deploying the AI/ML Platform on Azure AKS (step by step)
+# Runbook — Deploying the AI/ML Platform on Azure AKS, DevSecOps edition (step by step)
 
 > Audience: platform / DevOps engineer. Every step lists **what to run**, **what
 > you should see**, and **what to do if you don't**. Run commands from the repo
 > root unless stated otherwise. `ENV` is `dev` until Phase 11.
+>
+> 🔐 **DevSecOps edition.** Steps marked 🔐 are the security additions. Every gate is
+> explained in [DEVSECOPS.md](DEVSECOPS.md). If you also run the DevOps edition, use a
+> **separate subscription** (recommended), or change the `aiml` project prefix in
+> `terraform/envs/*/terraform.tfvars` and `terraform/global` — otherwise resource names collide.
 
 **Contents**
 
@@ -10,12 +15,14 @@
 - [Phase 1 — Configure the repository](#phase-1--configure-the-repository)
 - [Phase 2 — Global layer: state, ACR, GitHub OIDC](#phase-2--global-layer-state-acr-github-oidc)
 - [Phase 3 — GitHub configuration + first image build](#phase-3--github-configuration--first-image-build)
+- [Phase 3A — 🔐 Security setup (GitHub + supply chain)](#phase-3a--security-setup)
 - [Phase 4 — Provision the dev environment](#phase-4--provision-the-dev-environment)
 - [Phase 5 — GitOps platform sync (what Argo CD installs, in order)](#phase-5--gitops-platform-sync)
 - [Phase 6 — Secrets that need a human (JupyterHub OAuth)](#phase-6--secrets-that-need-a-human)
 - [Phase 7 — Run the ML training pipeline](#phase-7--run-the-ml-training-pipeline)
 - [Phase 8 — Validate inference + autoscaling](#phase-8--validate-inference--autoscaling)
 - [Phase 9 — Validate observability](#phase-9--validate-observability)
+- [Phase 9A — 🔐 Validate security controls](#phase-9a--validate-security-controls)
 - [Phase 10 — Model development in JupyterHub (CPU, GPU, Ray)](#phase-10--model-development-in-jupyterhub)
 - [Phase 11 — Production rollout](#phase-11--production-rollout)
 - [Phase 12 — Day-2 operations](#phase-12--day-2-operations)
@@ -68,10 +75,20 @@ Linux/WSL: `az aks install-cli` installs kubectl + kubelogin.
    ```
    Request increases now — GPU approval can take a day.
 4. Your Entra ID object id (becomes AKS cluster-admin): `az ad signed-in-user show --query id -o tsv`.
+5. 🔐 **Encryption at host** (system pool + NAP VMs) needs a one-time feature registration (takes a few minutes):
+   ```bash
+   az feature register --namespace Microsoft.Compute --name EncryptionAtHost
+   az feature show --namespace Microsoft.Compute --name EncryptionAtHost --query properties.state   # Registered
+   az provider register --namespace Microsoft.Compute
+   az provider register --namespace Microsoft.Security; az provider register --namespace Microsoft.PolicyInsights
+   ```
+6. 🔐 **Defender for Cloud / Azure Policy** are enabled by `terraform/global` (`security_services`). If your
+   organization already manages Defender plans or policy at management-group level, set those flags to
+   `false` in `terraform/global/terraform.tfvars` *before* Phase 2; set `security_contact_email`.
 
 ### 0.3 GitHub
 
-- Repository: `Cloud-Deployment-Resources-asimshahibm/DevOps-Series-AI-ML-Workload-deployment-on-Azure-AKS`.
+- Repository: `Cloud-Deployment-Resources-asimshahibm/DevSecOps-Series-AI-ML-Workload-deployment-on-Azure-AKS`.
 - Argo CD pulls this repo over HTTPS. If you make it **private**, add a read-only deploy key or token in Argo CD (`argocd repo add ...`) after Phase 4.
 
 ✅ **Exit criteria:** tools installed, `az account show` points at the right subscription, providers registered, quota requests submitted.
@@ -81,8 +98,8 @@ Linux/WSL: `az aks install-cli` installs kubectl + kubelogin.
 ## Phase 1 — Configure the repository
 
 ```bash
-git clone https://github.com/Cloud-Deployment-Resources-asimshahibm/DevOps-Series-AI-ML-Workload-deployment-on-Azure-AKS.git
-cd DevOps-Series-AI-ML-Workload-deployment-on-Azure-AKS
+git clone https://github.com/Cloud-Deployment-Resources-asimshahibm/DevSecOps-Series-AI-ML-Workload-deployment-on-Azure-AKS.git
+cd DevSecOps-Series-AI-ML-Workload-deployment-on-Azure-AKS
 make configure            # = scripts/configure.sh
 ```
 
@@ -189,7 +206,20 @@ gh api -X PUT repos/{owner}/{repo}/environments/prod
 
 ### 3.3 Branch protection on `main`
 
-Require PRs + status checks `Python lint + tests`, `Terraform fmt + validate + tflint`, `Helm lint + render + kubeconform`.
+Require PRs, **CODEOWNERS review**, signed commits (recommended), and these status checks (job names from `ci.yml`):
+
+```
+code · secret scanning (gitleaks)          code · SAST (Semgrep + Bandit)
+code · dependencies (pip-audit + OSV)      code · dependency review (PR)
+code · IaC & config scanning (Checkov + Trivy)
+code · Kubernetes policy (Kyverno CLI, shift-left)
+code · workflow security (actionlint + zizmor)
+build · Dockerfile lint (hadolint)         test · unit + model-security tests
+test · terraform validate + policy unit tests   test · helm lint + kubeconform
+CodeQL
+```
+
+Under Settings › Code security, also add a **code scanning merge rule** that blocks on high and critical alerts.
 
 ### 3.4 Build images **before** the cluster exists
 
@@ -213,6 +243,47 @@ branch or Environment differs from what `terraform/global` was applied with (`gi
 ❗ *Trivy fails on CRITICAL*: bump the base image / pinned package in `ml/*/requirements.txt` and push again.
 
 ✅ **Exit criteria:** images in ACR, `values-dev.yaml` tags ≠ `bootstrap`.
+
+---
+
+## Phase 3A — Security setup
+
+🔐 One-time settings that the security gates rely on.
+
+1. **Code security features** (Settings › Code security): enable *Dependency graph*,
+   *Dependabot alerts + security updates*, *Secret scanning + push protection*,
+   *Private vulnerability reporting* and *Code scanning* (the workflows upload SARIF from
+   gitleaks, Semgrep, Bandit, Checkov, Trivy, zizmor and CodeQL).
+2. **Actions hardening** (Settings › Actions › General): *Workflow permissions = Read
+   repository contents* (each job asks for more where it needs it). Leave *Allow GitHub
+   Actions to create and approve pull requests* ticked only if you use `promote-prod.yml`.
+3. **CODEOWNERS**: edit `.github/CODEOWNERS` and replace the placeholder teams with real
+   users or teams. Security paths need their approval.
+4. **Signing identity.** Kyverno only admits images signed by
+   `https://github.com/<org>/<repo>/.github/workflows/build-and-deploy.yml@refs/heads/main`.
+   If you fork or rename the repo, update `signing.subject` in
+   `charts/security-policies/values.yaml`. If you don't, every ML pod is rejected (that is the point).
+5. **Verify your first signed build** (from Phase 3.4):
+   ```bash
+   ACR="$(gh variable get ACR_NAME).azurecr.io"; az acr login -n "${ACR%%.*}"
+   IMG="$ACR/aiml/ml-inference@$(yq '.image.digest' charts/ml-inference/values-dev.yaml)"
+   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+   cosign verify "$IMG" --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+     --certificate-identity "https://github.com/$REPO/.github/workflows/build-and-deploy.yml@refs/heads/main" | jq '.[0].optional.Subject'
+   gh attestation verify "oci://$IMG" --repo "$REPO"
+   ```
+   Expected: `Verification succeeded` and the workflow subject. In the portal, ACR › Repositories shows
+   the signature, SBOM attestation and provenance as referrers of the digest.
+6. **Defender for Cloud**: Portal › Microsoft Defender for Cloud › Environment settings › your
+   subscription › *Defender plans* shows Containers, Storage, Key Vault, Open-source databases,
+   Resource Manager and CSPM **On**; Regulatory compliance lists *CIS Microsoft Azure Foundations
+   Benchmark v2.0.0* (data appears within ~24 h).
+
+❗ *Build fails at "Gate: Trivy" or "Gate: Grype"*: a fixable HIGH/CRITICAL CVE. Upgrade the
+package or base image. Add a time-boxed `.trivyignore` entry only with a reason
+(see [DEVSECOPS.md §5](DEVSECOPS.md#5-exceptions-process)).
+
+✅ **Exit criteria:** signed images with SBOM + provenance in ACR; all CI gates green on `main`; Defender plans on.
 
 ---
 
@@ -240,14 +311,14 @@ Resources created (≈ 110; 20–30 min, AKS + PostgreSQL + Application Gateway 
 |---|---|
 | 1 | Resource group `aiml-dev-rg`, Log Analytics `aiml-dev-law` |
 | 2 | VNet `10.10.0.0/16`: `snet-aks` /20 (service endpoints Storage/KeyVault/ACR), `snet-appgw` /24 (delegated), `snet-postgres` /24 (delegated), `snet-endpoints` /24; NSGs; private DNS zone for PostgreSQL |
-| 3 | Key Vault `aiml-dev-kv-<suffix>` (RBAC mode, audit logs to Log Analytics) |
-| 4 | Application Gateway `aiml-dev-appgw` (Standard_v2, autoscale) + public IP `aiml-dev-ml.<region>.cloudapp.azure.com` |
-| 5 | AKS `aiml-dev`: system pool (2 × `Standard_D4ds_v5`, AzureLinux, ephemeral OS), **node auto-provisioning** (managed Karpenter), Azure CNI Overlay + Cilium (network policy), Entra ID + Azure RBAC, local accounts disabled, OIDC issuer + Workload ID, AGIC add-on, control-plane logs → Log Analytics |
+| 3 | Key Vault `aiml-dev-kv-<suffix>` (**Premium**, RBAC mode, audit logs to Log Analytics) + 🔐 HSM key `aks-etcd-kms` (rotation policy) |
+| 4 | 🔐 WAF policy `aiml-dev-waf` (DRS 2.1, Bot Manager, per-IP rate limit, body cap) + Application Gateway `aiml-dev-appgw` (**WAF_v2**, autoscale, access + firewall logs) + public IP `aiml-dev-ml.<region>.cloudapp.azure.com` |
+| 5 | AKS `aiml-dev`: system pool (2 × `Standard_D4ds_v5`, AzureLinux, ephemeral OS), **node auto-provisioning** (managed Karpenter), Azure CNI Overlay + Cilium (network policy), Entra ID + Azure RBAC, local accounts disabled, OIDC issuer + Workload ID, AGIC add-on, 🔐 **KMS etcd encryption**, **Defender sensor**, **Azure Policy add-on**, encryption at host, control-plane + audit logs → Log Analytics; 🔐 PSS-restricted policy assignment (audit) |
 | 6 | Role assignments: AcrPull (kubelet), AGIC → gateway/subnet, cluster access (you, `gha-tf-apply`, `gha-tf-plan` custom read role, `gha-ci` cluster user) |
 | 7 | Storage account `aimldevdata<suffix>` (shared keys off, firewall: AKS subnet only) — containers `data`, `models`, `artifacts`, `loki`; lifecycle rules |
 | 8 | PostgreSQL Flexible Server 16 (private access) + Key Vault secrets `postgres-master`, `postgres-jupyterhub`, `postgres-argo-workflows` |
-| 9 | Workload identities `aiml-dev-{ml-training,ml-inference,jupyter-user,argo-workflows,loki,grafana,external-secrets}` + federated credentials + data-plane roles |
-| 10 | Key Vault secrets `grafana-admin`, `jupyterhub-github-oauth`, `elasticsearch-grafana` |
+| 9 | Workload identities `aiml-dev-{ml-training,ml-inference,jupyter-user,argo-workflows,loki,grafana,external-secrets,image-verifier}` + federated credentials + data-plane roles (image-verifier: AcrPull for Kyverno + Trivy Operator) |
+| 10 | Key Vault secrets `grafana-admin`, `jupyterhub-github-oauth`, `elasticsearch-grafana`, 🔐 `inference-api-keys`; 🔐 blob + PostgreSQL audit diagnostic settings |
 | 11 | In-cluster (Helm/K8s providers): `azurefile-nfs` StorageClass, `platform-postgres` ExternalName service, Argo CD, **root Application `root-dev`** (with the `cloud:` facts) |
 | 12 | Cost Management budgets `aiml-dev-total` / `aiml-dev-compute` (when `budgets.alert_emails` is set) |
 
@@ -267,6 +338,7 @@ kubectl -n argocd get applications                               # root-dev + ch
 | `Kubernetes cluster unreachable` / `kubelogin` errors during helm releases | `az login` expired or kubelogin missing → `az login`, `az aks install-cli`; IP not in `api_server_authorized_ip_ranges` → fix tfvars |
 | `Forbidden ... User "<oid>" cannot list resource` right after the cluster is created | Azure RBAC assignment still propagating (≤ 5 min) → re-run `make deploy ENV=dev` |
 | `SubnetIsDelegated` / AGIC `ApplicationGatewaySubnetCannotBeUsedByOtherResources` | don't put anything but the gateway in `snet-appgw` |
+| `EncryptionAtHost feature is not enabled` | Phase 0.2 step 5 (feature registration), then re-apply |
 | `QuotaExceeded` creating the system pool | vCPU quota for `Dds_v5` in the region (Phase 0.2) or choose another `system_node_pool.vm_size` |
 | `KeyVaultAlreadyExists` / `VaultAlreadySoftDeleted` after a destroy | `az keyvault purge -n aiml-dev-kv-<suffix>` (dev only), then re-apply |
 | Apply interrupted | just re-run `make deploy ENV=dev`; Terraform is idempotent |
@@ -289,11 +361,13 @@ Sync order (sync-waves) and what to check in each:
 | Wave | Application | Namespace | Check |
 |---|---|---|---|
 | -30 | `karpenter-nodepools` | kube-system | `kubectl get nodepools,aksnodeclasses` → `cpu`, `gpu`; AKSNodeClass `Ready` |
+| -30 | `kyverno` | kyverno | admission controller Running; 🔐 pod env has `AZURE_FEDERATED_TOKEN_FILE` (ACR credential helper) |
 | -30 | `external-secrets` | external-secrets | pods Running; pod env has `AZURE_FEDERATED_TOKEN_FILE` (Workload ID injected) |
+| -28 | `security-policies` | kyverno | `kubectl get clusterpolicy` → all `READY=True` |
 | -25 | `platform-config` | platform-system (+ others) | `kubectl get clustersecretstore azure-key-vault` Valid; `kubectl get externalsecrets -A` all `SecretSynced`; Job `postgres-db-init` Completed |
 | -20 | `kube-prometheus-stack` | monitoring | Prometheus, Alertmanager, Grafana Running (node auto-provisioning launches the first `ml-cpu` VM here) |
 | -15 | `loki`, `eck-operator`, `gpu-operator`, `kuberay-operator` | … | operators Running; Loki writes to the `loki` container |
-| -10 | `alloy`, `observability-extras`, `elastic-stack`, `argo-workflows`, `opencost`, `observability-rules` | … | ES `green`/`yellow`, Kibana up, Argo WF server up |
+| -10 | `alloy`, `observability-extras`, `elastic-stack`, `argo-workflows`, `opencost`, `observability-rules`, 🔐 `falco`, `trivy-operator`, `policy-reporter` | … | ES `green`/`yellow`, Kibana up, Argo WF server up, Falco DaemonSet ready, first VulnerabilityReports appear |
 | -5 | `jupyterhub` | jupyterhub | `hub` + `proxy` Running (hub may CrashLoop until Phase 6) |
 | 0 | `ray-cluster`, `ml-pipelines`, `ml-inference` | ray, ml-training, ml-serving | RayCluster `ready`; WorkflowTemplate exists; inference pods **not Ready yet** (no model) — expected |
 
@@ -416,19 +490,21 @@ kubectl -n ml-serving logs deploy/ml-inference | grep '"model loaded"'
 ```bash
 GW=$(kubectl -n ml-serving get ingress ml-inference -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
 # or the stable name: terraform -chdir=terraform/stack output -raw app_gateway_fqdn
-curl -s http://$GW/v1/models | jq '.version, .metadata.metrics'
-curl -s http://$GW/v1/predict -H 'content-type: application/json' \
+API_KEY=$(kubectl -n ml-serving get secret ml-inference-api-keys -o jsonpath='{.data.api-keys}' | base64 -d | head -1)
+curl -s http://$GW/v1/models -H "x-api-key: $API_KEY" | jq '.version, .metadata.metrics'
+curl -s http://$GW/v1/predict -H 'content-type: application/json' -H "x-api-key: $API_KEY" \
   -d '{"instances": [[5.1,3.5,1.4,0.2],[6.7,3.0,5.2,2.3]]}' | jq
 # -> setosa, virginica
+curl -s -o /dev/null -w '%{http_code}\n' http://$GW/v1/predict -d '{}'   # -> 401 without a key
 ```
 
-Swagger UI: `http://$GW/docs`.
+Swagger UI: `http://$GW/docs` (dev only; `security.enableDocs: false` in prod).
 
 Load test → HPA → node auto-provisioning:
 
 ```bash
 kubectl run load --rm -it --image=williamyeh/hey --restart=Never -- \
-  -z 5m -c 50 -m POST -T application/json \
+  -z 5m -c 50 -m POST -T application/json -H "x-api-key: $API_KEY" \
   -d '{"instances": [[5.1,3.5,1.4,0.2]]}' http://ml-inference.ml-serving/v1/predict
 # second terminal
 kubectl -n ml-serving get hpa -w
@@ -491,6 +567,69 @@ make smoke ENV=dev
 
 ---
 
+## Phase 9A — Validate security controls
+
+🔐 Prove each runtime control works. Don't just trust that it is installed.
+
+1. **Enable DAST** (once per environment):
+   ```bash
+   GW=$(terraform -chdir=terraform/stack output -raw app_gateway_fqdn)
+   KV=$(terraform -chdir=terraform/stack output -raw key_vault_name)
+   gh variable set DEV_INFERENCE_URL --body "http://$GW"
+   gh secret set DAST_API_KEY --body "$(az keyvault secret show --vault-name "$KV" -n inference-api-keys --query value -o tsv | jq -r .keys)"
+   gh workflow run dast.yml && gh run watch
+   ```
+   Expected: the DAST run is green (it scans through the WAF).
+2. **WAF blocks attacks at the edge:**
+   ```bash
+   curl -s -o /dev/null -w '%{http_code}\n' "http://$GW/v1/models?q=<script>alert(1)</script>" -H "x-api-key: $API_KEY"   # 403
+   curl -s -o /dev/null -w '%{http_code}\n' "http://$GW/v1/models" -H 'User-Agent: ${jndi:ldap://x/a}'                   # 403 (Log4Shell)
+   ```
+   Log Analytics: `AGWFirewallLogs | where Action == "Blocked" | take 20`.
+3. **Admission control rejects untrusted images:**
+   ```bash
+   kubectl -n ml-serving run probe --image=mcr.microsoft.com/azurelinux/busybox:1.36 --restart=Never -- sleep 60
+   # Error from server: admission webhook ... denied the request: ... verify-ml-image-signatures / restrict-image-registries
+   kubectl -n ml-serving run probe2 --image="$ACR/aiml/ml-inference:latest" --restart=Never
+   # denied: disallow-latest-tag
+   ```
+4. **Pod security:** a pod with `runAsUser: 0` in `ml-serving` is denied by `ml-restricted-pod-security` and by
+   Pod Security Admission; Azure Policy reports it in Defender for Cloud › Recommendations within ~30 min (audit).
+5. **Runtime detection (Falco + Defender):**
+   ```bash
+   POD=$(kubectl -n ml-serving get pod -l app.kubernetes.io/name=ml-inference -o name | head -1)
+   kubectl -n ml-serving exec "$POD" -- sh -c 'id' 2>/dev/null || true
+   ```
+   Within ~1 min: Loki `{priority="Critical"}` shows *Shell spawned in model-serving container* and
+   `FalcoCriticalEvent` fires. Defender for Containers raises its own alert for suspicious exec
+   activity (Defender for Cloud › Security alerts, may take ~15 min).
+6. **Model integrity:** publish a tampered copy of the current model as a new version and point the
+   registry at it (dev only):
+   ```bash
+   SA=$(terraform -chdir=terraform/stack output -raw storage_account)
+   CUR=$(az storage blob download --account-name "$SA" -c models -n iris-classifier/latest.json --auth-mode login -f /dev/stdout -o none | jq -r .version)
+   for f in metadata.json security.json; do
+     az storage blob copy start --account-name "$SA" --auth-mode login --destination-container models \
+       --destination-blob "iris-classifier/tamper-test/$f" --source-container models --source-blob "iris-classifier/$CUR/$f" -o none
+   done
+   echo "not the trained model" | az storage blob upload --account-name "$SA" --auth-mode login -c models -n iris-classifier/tamper-test/model.pkl --data @- --overwrite -o none
+   jq -n --arg p "$CUR" '{version:"tamper-test",previous:$p}' | az storage blob upload --account-name "$SA" --auth-mode login -c models -n iris-classifier/latest.json --data @- --overwrite -o none
+   ```
+   Within the refresh interval the pods log `model rejected by integrity check`, keep serving `$CUR`,
+   and `ModelArtifactIntegrityFailure` fires. `StorageBlobLogs` in Log Analytics shows who wrote the blobs.
+   Clean up: point `latest.json` back at `$CUR` and delete `iris-classifier/tamper-test/`.
+   (Run these from an IP in `storage_allowed_ip_ranges`, with *Storage Blob Data Contributor* on the account.)
+7. **Secrets encryption:** `az aks show -g aiml-dev-rg -n aiml-dev --query securityProfile.azureKeyVaultKms`
+   → `enabled: true`, key id of `aks-etcd-kms`.
+8. **Continuous scanning:** `kubectl get vulnerabilityreports,configauditreports,exposedsecretreports -n ml-serving`
+   lists reports for every workload; Grafana › Security › *Security Posture* is populated; Defender for Cloud ›
+   Recommendations › *Azure registry container images should have vulnerabilities resolved* lists ACR findings.
+9. `make smoke ENV=dev`. The **Security** section must be all PASS.
+
+✅ **Exit criteria:** WAF blocks XSS/Log4Shell; untrusted, unsigned, `latest` and root pods are rejected; Falco + integrity alerts fire on demand; KMS enabled; DAST green; Defender alerts and recommendations visible.
+
+---
+
 ## Phase 10 — Model development in JupyterHub
 
 1. `make access` → http://localhost:8000 → *Sign in with GitHub* (must be in the allowed org).
@@ -526,6 +665,9 @@ make smoke ENV=dev
 
 1. **Harden `terraform/envs/prod/terraform.tfvars`**:
    - `api_server_authorized_ip_ranges` → your VPN/office CIDRs (and your CI runners' egress, or use self-hosted runners in the VNet).
+     🔐 **Required**: the OPA policy `policy/terraform` *denies* the prod plan while it is empty
+     (`prod AKS API server must restrict authorized IP ranges`).
+   - 🔐 with self-hosted runners in the VNet: `key_vault_default_action = "Deny"` (see DEVSECOPS.md accepted risks).
    - review VM sizes, PostgreSQL SKU, `app_gateway` capacity.
 2. **DNS/TLS**: create a CNAME `api.<your-domain>` / `jupyter.<your-domain>` → `terraform output app_gateway_fqdn`;
    provide the certificates as Kubernetes TLS secrets (cert-manager or your PKI); set `ingress.host` +
@@ -544,9 +686,13 @@ make smoke ENV=dev
 6. Repeat Phase 6 for prod secrets (Key Vault `aiml-prod-kv-<suffix>`, secret `jupyterhub-github-oauth`).
 7. **Promote images** dev → prod:
    ```bash
-   gh workflow run promote-prod.yml           # opens PR "deploy(prod): ml images <tag>"
+   gh workflow run promote-prod.yml           # opens PR "deploy(prod): verified ml images <tag>"
    ```
-   Complete the checklist in the PR, get approval, merge → Argo CD in prod syncs.
+   🔐 The workflow first re-verifies every dev **digest**: cosign signature, SLSA
+   provenance, a fresh Trivy scan with today's CVE data, and the last DAST run. Only then
+   does it open the PR. Complete the checklist (Security Posture dashboard and Defender alerts clean
+   in dev), get CODEOWNERS approval and merge. Argo CD in prod syncs **inside the change window**
+   (syncs are denied 22:00–06:00 UTC; manual sync is allowed for hotfixes).
 8. Train in prod: nightly CronWorkflow runs at 03:00 UTC with `auto-promote=false`; approve promotion:
    ```bash
    argo -n ml-training list
@@ -565,6 +711,8 @@ make smoke ENV=dev
 |---|---|
 | **Deploy new model code** | PR to `ml/` → merge → dev auto-deploys → `promote-prod.yml` PR |
 | **Retrain** | `run-training-pipeline.yml` or wait for nightly CronWorkflow |
+| **Rotate inference API keys** 🔐 | add a key line to Key Vault `inference-api-keys` (`{"keys":"old\nnew"}`) → clients switch → remove the old key; ESO refreshes in ≤ 15 min |
+| **Review security posture (weekly)** 🔐 | Defender for Cloud secure score + new recommendations; Grafana *Security Posture*; open Dependabot / code-scanning alerts; `.trivyignore` / `.checkov.yaml` exceptions approaching expiry |
 | **Roll back a model** (seconds, no deploy) | `kubectl -n ml-training run rollback --rm -it --restart=Never --labels=azure.workload.identity/use=true --overrides='{"spec":{"serviceAccountName":"ml-training"}}' --image=<acr>.azurecr.io/aiml/ml-training:<tag> -- trainer.promote --model-store az://<storage-account>/models --rollback` |
 | **Pin a model version** | set `model.version: <version>` in `charts/ml-inference/values-<env>.yaml` → PR |
 | **Roll back app/chart** | `git revert <deploy commit>` → Argo CD syncs |

@@ -49,3 +49,18 @@ resource "azurerm_key_vault_secret" "es_grafana" {
   value        = jsonencode({ username = "grafana", password = random_password.es_grafana.result })
   depends_on   = [azurerm_role_assignment.kv_secrets_officer]
 }
+
+# API keys for the ml-inference API (/v1/*). One key per line in "keys";
+# rotate by adding a key, rolling clients, then removing the old one.
+resource "random_password" "inference_api_key" {
+  length  = 40
+  special = false
+}
+
+resource "azurerm_key_vault_secret" "inference_api_keys" {
+  name         = "inference-api-keys"
+  key_vault_id = azurerm_key_vault.this.id
+  content_type = "application/json"
+  value        = jsonencode({ keys = random_password.inference_api_key.result })
+  depends_on   = [azurerm_role_assignment.kv_secrets_officer]
+}

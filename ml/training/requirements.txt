@@ -6,3 +6,5 @@ numpy==2.2.1
 pandas==2.2.3
 azure-identity==1.27.0
 azure-storage-blob==12.31.1
+# model supply-chain scanner (pickle/joblib unsafe-operator detection); Python < 3.13
+modelscan==0.8.8; python_version < "3.13"

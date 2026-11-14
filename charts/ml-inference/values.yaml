@@ -7,7 +7,18 @@
 image:
   repository: ""   # <acr>.azurecr.io/aiml/ml-inference
   tag: "bootstrap" # replaced by CI on first build
+  digest: ""       # sha256:... set by CI; when present the image is pulled by digest (immutable, signature-verified)
   pullPolicy: IfNotPresent
+
+security:
+  requireModelScan: true   # refuse model artifacts without a passing ModelScan record / matching SHA-256
+  enableDocs: true         # /docs + /openapi.json (DAST uses them in dev); disable in prod
+  apiKeys:
+    enabled: true          # X-API-Key on /v1/*; keys synced from Key Vault by External Secrets
+    secretKey: inference-api-keys   # Key Vault secret (JSON {"keys": "k1\nk2"}), written by Terraform
+  networkPolicy:
+    enabled: true
+    ingressCidr: ""        # Application Gateway subnet, set by Argo CD from Terraform (cloudValues)
 
 replicaCount: 2
 

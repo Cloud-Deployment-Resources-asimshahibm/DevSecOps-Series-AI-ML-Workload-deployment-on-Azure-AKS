@@ -1,5 +1,6 @@
 image:
   tag: "bootstrap"
+  digest: ""
 
 storage:
   scratch:

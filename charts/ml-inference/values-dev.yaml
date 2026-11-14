@@ -1,5 +1,6 @@
 image:
   tag: "bootstrap"
+  digest: ""
 
 replicaCount: 1
 
@@ -12,3 +13,6 @@ autoscaling:
 
 podDisruptionBudget:
   enabled: false
+
+security:
+  enableDocs: true

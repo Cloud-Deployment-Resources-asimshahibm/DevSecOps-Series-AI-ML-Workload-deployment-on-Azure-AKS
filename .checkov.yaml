@@ -1,0 +1,60 @@
+# Checkov configuration — every skip below is an ACCEPTED RISK with a reason.
+# Changes to this file require a security CODEOWNER review.
+directory:
+  - terraform
+  - ml
+  - .github/workflows
+  - rendered            # helm-rendered charts (CI renders them before scanning)
+framework:
+  - terraform
+  - dockerfile
+  - github_actions
+  - kubernetes
+download-external-modules: true
+quiet: true
+compact: true
+soft-fail: false
+skip-check:
+  # --- Terraform (azurerm)
+  - CKV_AZURE_59    # storage public network: needed for service-endpoint firewall rules + GitHub-hosted runners; default action Deny, shared keys off
+  - CKV2_AZURE_33   # storage private endpoint: service endpoints + firewall instead (snet-endpoints is ready for private endpoints)
+  - CKV2_AZURE_32   # Key Vault private endpoint: AKS KMS runs in public key-vault mode; Entra ID + RBAC + audit logs; see key_vault_default_action
+  - CKV_AZURE_109   # Key Vault firewall: default Allow (GitHub-hosted runners); set key_vault_default_action = Deny with self-hosted runners
+  - CKV_AZURE_206   # storage replication: LRS in dev, ZRS in prod/state; data is reproducible from Git + pipelines
+  - CKV_AZURE_33    # queue logging: no queues are used
+  - CKV2_AZURE_21   # blob read logging: enabled via diagnostic settings on blobServices (Checkov looks for legacy analytics logging)
+  - CKV2_AZURE_1    # storage CMK: platform keys + infrastructure (double) encryption; CMK adds key-loss blast radius for regenerable ML data
+  - CKV_AZURE_41    # secret expiry: Key Vault refuses to return expired secrets (would break External Secrets); rotation via Terraform -replace
+  - CKV_AZURE_42    # Key Vault recoverable: soft delete always on; purge protection on in prod (conftest-enforced), off in dev for teardown
+  - CKV_AZURE_110   # same: purge protection is prod-only
+  - CKV_AZURE_136   # PostgreSQL geo-redundant backup: prod only (tfvars)
+  - CKV_AZURE_170   # AKS paid SLA: Standard tier in prod, Free in dev
+  - CKV_AZURE_115   # private cluster: API server authorized IP ranges + Entra ID only; conftest requires ranges in prod
+  - CKV_AZURE_117   # disk encryption set: encryption at host + platform keys (DES/CMK optional, see docs/DEVSECOPS.md)
+  - CKV_AZURE_232   # only critical pods on system pool: platform controllers (Argo CD, ESO, Kyverno) run there by design; ML workloads go to NAP pools
+  - CKV_AZURE_4     # Container Insights: metrics/logs via Prometheus, Loki, ELK; control plane + audit via diagnostic settings
+  - CKV_AZURE_172   # Secrets Store CSI rotation: CSI driver not used (External Secrets Operator)
+  - CKV_AZURE_120   # Application Gateway WAF: attached as a WAF policy (firewall_policy_id), Checkov only checks the legacy waf_configuration block
+  - CKV_AZURE_135   # WAF Log4j rule: Microsoft_DefaultRuleSet 2.1 includes the Log4Shell (CVE-2021-44228) rules; Checkov only recognises OWASP 3.x
+  - CKV_AZURE_217   # HTTP listener: AGIC owns listeners; HTTPS + ssl-redirect when a host/TLS secret is set (prod)
+  - CKV_AZURE_160   # port 80 from Internet on the gateway subnet: HTTP->HTTPS redirect and dev without TLS
+  - CKV2_AZURE_31   # NSG on snet-aks: AKS manages the NIC-level NSG; Cilium NetworkPolicies + Kyverno inside the cluster
+  - CKV_AZURE_139   # ACR public network: GitHub-hosted runners push; Entra ID tokens only (admin user disabled), Defender scans every push
+  - CKV_AZURE_164   # ACR content trust (Notary v1, deprecated): images are cosign-signed and verified by Kyverno at admission
+  - CKV_AZURE_165   # ACR geo-replication: single-region platform
+  - CKV_AZURE_166   # ACR quarantine: replaced by Trivy/Grype gates before push + Defender scanning + signature verification at admission
+  - CKV_AZURE_20    # security contact phone: e-mail is configured (security_contact_email)
+  - CKV_AZURE_131   # security contact e-mail: set via variable (Checkov evaluates the empty default)
+  - CKV_AZURE_227   # host encryption IS enabled (host_encryption_enabled, azurerm 5.x); Checkov reads the 3.x name enable_host_encryption
+  # --- Kubernetes (rendered charts)
+  - CKV_K8S_43    # image digest: digests are injected by CI (values-<env>.yaml) and enforced by Kyverno mutateDigest
+  - CKV_K8S_15    # imagePullPolicy Always: digests make IfNotPresent safe
+  - CKV_K8S_35    # secrets as files: done; env vars carry only non-secret config
+  - CKV_K8S_40    # high UID (>10000): images run as uid 1000 (jovyan/ray convention), non-root enforced
+  - CKV2_K8S_6    # NetworkPolicy per pod: provided at namespace level (charts/security-policies, ml-inference)
+  - CKV_K8S_21    # default namespace: charts are namespace-agnostic; Argo CD sets the destination namespace
+  - CKV_K8S_11    # CPU limits: deliberately unset for latency-sensitive inference (CFS throttling); memory limits enforced by Kyverno
+  # --- GitHub Actions
+  - CKV_GHA_7     # workflow_dispatch inputs: operational workflows (train / terraform env); inputs are validated, never reach image builds
+  # --- Dockerfile
+  - CKV_DOCKER_2  # HEALTHCHECK: Kubernetes liveness/readiness probes are used instead

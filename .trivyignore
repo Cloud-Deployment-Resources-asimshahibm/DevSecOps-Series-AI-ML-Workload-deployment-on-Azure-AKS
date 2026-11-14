@@ -1,0 +1,13 @@
+# Accepted findings (ID + justification + expiry). Reviewed by security CODEOWNERS.
+# Format: <ID>  # reason — exp:YYYY-MM-DD   (trivy honours "exp:" to auto-expire an ignore)
+
+# AZU-0041: AKS API server authorized IP ranges — empty in dev only; conftest DENIES prod plans without ranges
+AZU-0041 exp:2027-06-30
+# AZU-0047: Internet ingress on the Application Gateway NSG — 80/443 only, it is the public ingress (WAF in Prevention mode)
+AZU-0047 exp:2027-06-30
+# AZU-0013 / AZU-0012: Key Vault + state storage reachable from GitHub-hosted runners (Entra ID + RBAC only, shared keys
+# disabled, audit-logged). Remove when Terraform runs on self-hosted runners in the VNet (key_vault_default_action = Deny).
+AZU-0013 exp:2027-06-30
+AZU-0012 exp:2027-06-30
+# AVD-KSV-0014/KSV014: readOnlyRootFilesystem — Ray head/workers need a writable /tmp/ray (object spilling)
+KSV014 exp:2027-06-30

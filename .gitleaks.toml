@@ -1,0 +1,17 @@
+title = "gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Placeholders rendered by scripts/configure.sh and documentation examples"
+regexes = [
+  '''__SUBSCRIPTION_ID__''',
+  '''__ADMIN_OBJECT_ID__''',
+  '''__TFSTATE_STORAGE_ACCOUNT__''',
+  '''00000000-0000-0000-0000-0000000000[0-9]{2}''',
+  '''CHANGE_ME''',
+]
+paths = [
+  '''docs/.*\.md''',
+]

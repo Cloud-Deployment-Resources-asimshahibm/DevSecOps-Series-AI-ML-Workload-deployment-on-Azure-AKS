@@ -11,6 +11,11 @@
 #                   ├─> PostgreSQL Flexible Server (JupyterHub, Argo Workflows archive)
 #                   ├─> Workload identities for every workload
 #                   └─> Day-0 platform (storage class, Argo CD root app)
+#
+# DevSecOps additions: WAF_v2 policy on the gateway, AKS secrets encrypted with a
+# Key Vault key (KMS), Defender for Containers sensor, Azure Policy add-on (PSS
+# restricted, audit), image-verifier identity (Kyverno / Trivy -> ACR), blob /
+# PostgreSQL / gateway / Key Vault audit logs, inference API keys in Key Vault.
 ################################################################################
 
 data "azurerm_client_config" "current" {}
@@ -66,29 +71,73 @@ resource "azurerm_key_vault" "this" {
   location                   = var.location
   resource_group_name        = azurerm_resource_group.this.name
   tenant_id                  = data.azurerm_client_config.current.tenant_id
-  sku_name                   = "standard"
+  sku_name                   = "premium" # HSM-backed keys for AKS KMS
   rbac_authorization_enabled = true
   purge_protection_enabled   = var.key_vault_purge_protection
   soft_delete_retention_days = var.environment == "prod" ? 90 : 7
   tags                       = local.tags
+
+  # AKS KMS (public key-vault mode) and Terraform on GitHub-hosted runners need
+  # the public endpoint; access is still Entra ID + RBAC only and audit-logged.
+  # With self-hosted runners in the VNet set key_vault_default_action = "Deny".
+  network_acls {
+    default_action             = var.key_vault_default_action
+    bypass                     = "AzureServices"
+    virtual_network_subnet_ids = [module.network.subnet_ids.aks]
+    ip_rules                   = var.key_vault_allowed_ip_ranges
+  }
 }
 
 # whoever applies (you, or the tf-apply identity in CI) writes the secrets
 resource "azurerm_role_assignment" "kv_secrets_officer" {
   for_each = {
-    current  = data.azurerm_client_config.current.object_id
-    tf-apply = data.azurerm_user_assigned_identity.gha["tf-apply"].principal_id
+    "current/secrets"  = { principal = data.azurerm_client_config.current.object_id, role = "Key Vault Secrets Officer" }
+    "tf-apply/secrets" = { principal = data.azurerm_user_assigned_identity.gha["tf-apply"].principal_id, role = "Key Vault Secrets Officer" }
+    "current/crypto"   = { principal = data.azurerm_client_config.current.object_id, role = "Key Vault Crypto Officer" }
+    "tf-apply/crypto"  = { principal = data.azurerm_user_assigned_identity.gha["tf-apply"].principal_id, role = "Key Vault Crypto Officer" }
   }
   scope                = azurerm_key_vault.this.id
-  role_definition_name = "Key Vault Secrets Officer"
-  principal_id         = each.value
+  role_definition_name = each.value.role
+  principal_id         = each.value.principal
 }
 
-# terraform plan refreshes secret metadata
+# terraform plan refreshes secret values and key metadata
 resource "azurerm_role_assignment" "kv_plan_reader" {
+  for_each             = toset(["Key Vault Secrets User", "Key Vault Reader"])
   scope                = azurerm_key_vault.this.id
-  role_definition_name = "Key Vault Secrets User"
+  role_definition_name = each.value
   principal_id         = data.azurerm_user_assigned_identity.gha["tf-plan"].principal_id
+  principal_type       = "ServicePrincipal"
+}
+
+# Envelope encryption of Kubernetes Secrets in etcd (AKS KMS), rotated yearly
+resource "azurerm_key_vault_key" "aks_etcd" {
+  name            = "aks-etcd-kms"
+  key_vault_id    = azurerm_key_vault.this.id
+  key_type        = "RSA-HSM"
+  key_size        = 2048
+  key_opts        = ["encrypt", "decrypt", "wrapKey", "unwrapKey"]
+  expiration_date = timeadd(formatdate("YYYY-MM-DD'T'00:00:00Z", plantimestamp()), "17520h") # +2 years
+
+  rotation_policy {
+    automatic {
+      time_before_expiry = "P30D"
+    }
+    expire_after         = "P2Y"
+    notify_before_expiry = "P29D"
+  }
+
+  depends_on = [azurerm_role_assignment.kv_secrets_officer]
+
+  lifecycle {
+    ignore_changes = [expiration_date] # rotation policy renews it
+  }
+}
+
+resource "azurerm_role_assignment" "aks_kms" {
+  scope                = azurerm_key_vault.this.id
+  role_definition_name = "Key Vault Crypto User"
+  principal_id         = azurerm_user_assigned_identity.aks.principal_id
   principal_type       = "ServicePrincipal"
 }
 
@@ -105,16 +154,43 @@ resource "azurerm_log_analytics_workspace" "this" {
 # ------------------------------------------------------------------------------
 # Ingress: Application Gateway (configured by the AGIC add-on)
 # ------------------------------------------------------------------------------
+module "waf" {
+  source                = "../modules/waf"
+  name                  = local.name
+  location              = var.location
+  resource_group        = azurerm_resource_group.this.name
+  mode                  = var.waf.mode
+  rate_limit_per_minute = var.waf.rate_limit_per_minute
+  max_body_kb           = var.waf.max_body_kb
+  tags                  = local.tags
+}
+
 module "app_gateway" {
-  source         = "../modules/app-gateway"
-  name           = local.name
-  location       = var.location
-  resource_group = azurerm_resource_group.this.name
-  subnet_id      = module.network.subnet_ids.appgw
-  zones          = local.zones
-  min_capacity   = var.app_gateway.min_capacity
-  max_capacity   = var.app_gateway.max_capacity
-  tags           = local.tags
+  source             = "../modules/app-gateway"
+  name               = local.name
+  location           = var.location
+  resource_group     = azurerm_resource_group.this.name
+  subnet_id          = module.network.subnet_ids.appgw
+  zones              = local.zones
+  min_capacity       = var.app_gateway.min_capacity
+  max_capacity       = var.app_gateway.max_capacity
+  sku                = "WAF_v2"
+  firewall_policy_id = module.waf.id
+  tags               = local.tags
+}
+
+resource "azurerm_monitor_diagnostic_setting" "app_gateway" {
+  name                           = "access-and-waf"
+  target_resource_id             = module.app_gateway.id
+  log_analytics_workspace_id     = azurerm_log_analytics_workspace.this.id
+  log_analytics_destination_type = "Dedicated"
+
+  enabled_log {
+    category = "ApplicationGatewayAccessLog"
+  }
+  enabled_log {
+    category = "ApplicationGatewayFirewallLog"
+  }
 }
 
 # ------------------------------------------------------------------------------
@@ -183,6 +259,7 @@ resource "azurerm_kubernetes_cluster" "this" {
     os_sku                      = "AzureLinux"
     os_disk_type                = "Ephemeral"
     os_disk_size_gb             = 128
+    host_encryption_enabled     = true # temp disks, caches, OS disk data flows encrypted on the host
     max_pods                    = 110
     temporary_name_for_rotation = "systemtmp"
     node_labels                 = { workload = "system" }
@@ -218,6 +295,20 @@ resource "azurerm_kubernetes_cluster" "this" {
     gateway_id = module.app_gateway.id
   }
 
+  # DevSecOps: Secrets in etcd encrypted with our Key Vault key
+  key_management_service {
+    key_vault_key_id         = azurerm_key_vault_key.aks_etcd.id
+    key_vault_network_access = "Public"
+  }
+
+  # Defender for Containers sensor (runtime threat detection, eBPF)
+  microsoft_defender {
+    log_analytics_workspace_id = azurerm_log_analytics_workspace.this.id
+  }
+
+  # Azure Policy add-on: compliance reporting for Kubernetes (PSS restricted, audit)
+  azure_policy_enabled = true
+
   storage_profile {
     disk_driver_enabled         = true
     file_driver_enabled         = true
@@ -227,7 +318,7 @@ resource "azurerm_kubernetes_cluster" "this" {
 
   tags = local.tags
 
-  depends_on = [azurerm_role_assignment.aks_network]
+  depends_on = [azurerm_role_assignment.aks_network, azurerm_role_assignment.aks_kms]
 
   lifecycle {
     ignore_changes = [kubernetes_version] # patch upgrades are automatic
@@ -272,6 +363,20 @@ resource "azurerm_monitor_diagnostic_setting" "aks" {
       category = enabled_log.value
     }
   }
+}
+
+# Pod Security Standards (restricted) reported by Azure Policy — Kyverno enforces,
+# Azure Policy gives the compliance view in Defender for Cloud.
+data "azurerm_policy_set_definition" "pss_restricted" {
+  name = "42b8ef37-b724-4e24-bbc8-7a7708edfe00" # Kubernetes cluster pod security restricted standards for Linux-based workloads
+}
+
+resource "azurerm_resource_policy_assignment" "pss_restricted" {
+  name                 = "${local.name}-pss-restricted"
+  display_name         = "${local.name}: Pod Security Standards restricted (audit)"
+  resource_id          = azurerm_kubernetes_cluster.this.id
+  policy_definition_id = data.azurerm_policy_set_definition.pss_restricted.id
+  enforce              = false
 }
 
 resource "azurerm_monitor_diagnostic_setting" "key_vault" {
@@ -349,6 +454,21 @@ module "storage" {
   tags               = local.tags
 }
 
+# Data-plane audit trail (the CloudTrail S3 data events equivalent)
+resource "azurerm_monitor_diagnostic_setting" "blob" {
+  name                           = "blob-audit"
+  target_resource_id             = "${module.storage.account_id}/blobServices/default"
+  log_analytics_workspace_id     = azurerm_log_analytics_workspace.this.id
+  log_analytics_destination_type = "Dedicated"
+
+  dynamic "enabled_log" {
+    for_each = ["StorageRead", "StorageWrite", "StorageDelete"]
+    content {
+      category = enabled_log.value
+    }
+  }
+}
+
 module "database" {
   source                = "../modules/database"
   name                  = local.name
@@ -362,6 +482,7 @@ module "database" {
   high_availability     = var.postgres.high_availability
   backup_retention_days = var.postgres.backup_retention_days
   geo_redundant_backup  = var.postgres.geo_redundant_backup
+  log_analytics_id      = azurerm_log_analytics_workspace.this.id
   tags                  = local.tags
 
   depends_on = [azurerm_role_assignment.kv_secrets_officer]
@@ -376,6 +497,7 @@ module "workload_identity" {
   container_ids    = module.storage.container_ids
   key_vault_id     = azurerm_key_vault.this.id
   monitoring_scope = data.azurerm_subscription.current.id
+  acr_id           = data.azurerm_container_registry.shared.id
   tags             = local.tags
 }
 
@@ -395,23 +517,24 @@ module "platform" {
 
   # Facts Git cannot know -> Argo CD root app -> templated into child apps
   cloud = {
-    provider          = "azure"
-    tenantId          = data.azurerm_client_config.current.tenant_id
-    subscriptionId    = var.subscription_id
-    location          = var.location
-    resourceGroup     = azurerm_resource_group.this.name
-    nodeResourceGroup = azurerm_kubernetes_cluster.this.node_resource_group
-    clusterName       = azurerm_kubernetes_cluster.this.name
-    aksSubnetId       = module.network.subnet_ids.aks
-    vnetCidr          = var.vnet_cidr
-    storageAccount    = module.storage.account_name
-    blobEndpoint      = module.storage.blob_endpoint
-    keyVaultName      = azurerm_key_vault.this.name
-    keyVaultUri       = azurerm_key_vault.this.vault_uri
-    acrLoginServer    = data.azurerm_container_registry.shared.login_server
-    appGatewayFqdn    = module.app_gateway.fqdn
-    clientIds         = module.workload_identity.client_ids
-    ciPrincipalId     = data.azurerm_user_assigned_identity.gha["ci"].principal_id
+    provider             = "azure"
+    tenantId             = data.azurerm_client_config.current.tenant_id
+    subscriptionId       = var.subscription_id
+    location             = var.location
+    resourceGroup        = azurerm_resource_group.this.name
+    nodeResourceGroup    = azurerm_kubernetes_cluster.this.node_resource_group
+    clusterName          = azurerm_kubernetes_cluster.this.name
+    aksSubnetId          = module.network.subnet_ids.aks
+    vnetCidr             = var.vnet_cidr
+    appGatewaySubnetCidr = module.network.subnet_cidrs.appgw
+    storageAccount       = module.storage.account_name
+    blobEndpoint         = module.storage.blob_endpoint
+    keyVaultName         = azurerm_key_vault.this.name
+    keyVaultUri          = azurerm_key_vault.this.vault_uri
+    acrLoginServer       = data.azurerm_container_registry.shared.login_server
+    appGatewayFqdn       = module.app_gateway.fqdn
+    clientIds            = module.workload_identity.client_ids
+    ciPrincipalId        = data.azurerm_user_assigned_identity.gha["ci"].principal_id
   }
 
   depends_on = [

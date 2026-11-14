@@ -4,6 +4,7 @@ rayVersion: "2.40.0"
 image:
   repository: ""      # <acr>.azurecr.io/aiml/ml-ray (set by Argo CD from Terraform outputs)
   tag: "bootstrap"    # bumped by CI
+  digest: ""          # sha256:... (signed) — preferred when set
 
 serviceAccount:
   name: ray-worker

@@ -7,6 +7,8 @@ metadata:
 spec:
   imageFamily: {{ $.Values.imageFamily }}
   osDiskSizeGB: {{ $cfg.osDiskSizeGB }}
+  security:
+    encryptionAtHost: {{ $.Values.encryptionAtHost }}   # NAP then only picks SKUs that support it
   {{- with $.Values.subnetId }}
   vnetSubnetID: {{ . }}         # same subnet as the system pool (service endpoints, NSG)
   {{- end }}

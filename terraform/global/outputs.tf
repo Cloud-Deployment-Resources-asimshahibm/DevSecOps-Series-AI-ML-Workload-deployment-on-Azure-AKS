@@ -48,3 +48,8 @@ output "gha_principal_ids" {
   description = "Object ids of the GitHub identities (the stack grants them cluster access)."
   value       = module.github_oidc.principal_ids
 }
+
+output "security_workspace_id" {
+  description = "Log Analytics workspace for the activity log and Defender exports."
+  value       = module.security_baseline.security_workspace_id
+}

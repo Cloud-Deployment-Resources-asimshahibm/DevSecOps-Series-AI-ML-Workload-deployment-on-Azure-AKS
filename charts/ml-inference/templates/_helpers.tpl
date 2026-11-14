@@ -14,3 +14,12 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/part-of: ml-platform
 helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version }}
 {{- end -}}
+
+{{- define "ml-inference.image" -}}
+{{- $repo := required "image.repository is required" .Values.image.repository -}}
+{{- if .Values.image.digest -}}
+{{ $repo }}@{{ .Values.image.digest }}
+{{- else -}}
+{{ $repo }}:{{ .Values.image.tag }}
+{{- end -}}
+{{- end -}}

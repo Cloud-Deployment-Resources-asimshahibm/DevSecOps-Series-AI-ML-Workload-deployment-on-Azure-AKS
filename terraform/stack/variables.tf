@@ -123,6 +123,31 @@ variable "key_vault_purge_protection" {
   default     = false
 }
 
+variable "key_vault_default_action" {
+  description = "Key Vault firewall default. Allow = Entra ID + RBAC still required (GitHub-hosted runners, AKS KMS public mode); Deny = only the AKS subnet + key_vault_allowed_ip_ranges."
+  type        = string
+  default     = "Allow"
+}
+
+variable "key_vault_allowed_ip_ranges" {
+  type    = list(string)
+  default = []
+}
+
+variable "waf" {
+  description = "Application Gateway WAF policy."
+  type = object({
+    mode                  = string # Detection | Prevention
+    rate_limit_per_minute = number
+    max_body_kb           = number
+  })
+  default = {
+    mode                  = "Prevention"
+    rate_limit_per_minute = 600
+    max_body_kb           = 256
+  }
+}
+
 # ----------------------------- gitops -----------------------------
 variable "argocd_ha" {
   type    = bool

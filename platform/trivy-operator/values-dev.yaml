@@ -1,0 +1,3 @@
+# serviceAccount client-id: set by Argo CD (cloudValues)
+operator:
+  scanJobsConcurrentLimit: 2

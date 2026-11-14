@@ -41,8 +41,11 @@ check "Elasticsearch green/yellow"          bash -c "kubectl -n logging get elas
 echo "== Inference"
 # AGIC publishes the Application Gateway public IP on the ingress status
 GW=$(kubectl -n ml-serving get ingress ml-inference -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null)
+API_KEY=$(kubectl -n ml-serving get secret ml-inference-api-keys -o jsonpath='{.data.api-keys}' 2>/dev/null | base64 -d | head -1)
 if [[ -n "$GW" ]]; then
-  resp=$(curl -s -m 10 "http://$GW/v1/predict" -H 'content-type: application/json' -d '{"instances": [[5.1,3.5,1.4,0.2]]}')
+  code=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://$GW/v1/predict" -H 'content-type: application/json' -d '{"instances": [[5.1,3.5,1.4,0.2]]}')
+  [[ "$code" == "401" || "$code" == "403" ]] && ok "predict without API key rejected ($code)" || bad "predict without API key returned $code (expected 401)"
+  resp=$(curl -s -m 10 "http://$GW/v1/predict" -H 'content-type: application/json' -H "x-api-key: ${API_KEY}" -d '{"instances": [[5.1,3.5,1.4,0.2]]}')
   if jq -e '.predictions[0].label=="setosa"' <<<"$resp" >/dev/null 2>&1; then
     ok "predict via Application Gateway -> setosa (model $(jq -r .model_version <<<"$resp"))"
   else
@@ -50,6 +53,19 @@ if [[ -n "$GW" ]]; then
   fi
 else
   bad "Application Gateway address not published yet for ml-inference (AGIC)"
+fi
+
+echo "== Security"
+check "Kyverno admission controller ready"  kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=10s
+check "security ClusterPolicies Ready"      bash -c "kubectl get clusterpolicy verify-ml-image-signatures ml-restricted-pod-security -o jsonpath='{.items[*].status.ready}' | grep -qv false"
+check "Falco running on every node"         kubectl -n falco rollout status ds/falco --timeout=10s
+check "Trivy Operator ready"                kubectl -n trivy-system rollout status deploy/trivy-operator --timeout=10s
+check "Defender for Containers sensor"      bash -c "kubectl -n kube-system get ds -l app=microsoft-defender --no-headers 2>/dev/null | grep -q . || kubectl -n kube-system get ds microsoft-defender-collector-ds"
+check "unsigned/untrusted image rejected"   bash -c "! kubectl -n ml-serving run unsigned-probe --image=mcr.microsoft.com/azurelinux/busybox:1.36 --restart=Never --dry-run=server -- true 2>/dev/null"
+check "no critical CVEs in ML namespaces"   bash -c "! kubectl get vulnerabilityreports -n ml-serving -o json | jq -e '[.items[].report.summary.criticalCount] | add > 0'"
+if [[ -n "${GW:-}" ]]; then
+  waf=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "http://$GW/v1/predict?q=<script>alert(1)</script>" -H "x-api-key: ${API_KEY}")
+  [[ "$waf" == "403" ]] && ok "WAF blocks XSS probe (403)" || bad "WAF did not block XSS probe (HTTP $waf; prevention mode?)"
 fi
 
 echo; echo "passed: $pass  failed: $fail"

@@ -6,8 +6,9 @@ URIs:
 
 Layout under the store root:
 
-    <model>/<version>/model.joblib      serialized sklearn pipeline
-    <model>/<version>/metadata.json     metrics, params, gate result, git sha
+    <model>/<version>/model.pkl         serialized sklearn pipeline (pickle protocol 5)
+    <model>/<version>/metadata.json     metrics, params, gate result, git sha, artifact_sha256
+    <model>/<version>/security.json     ModelScan result (written by the scan step, required to promote)
     <model>/latest.json                 {"version": ..., "previous": ...}  <- written ONLY by promotion
 
 Inference servers follow latest.json, so promotion / rollback is a single,
@@ -20,6 +21,7 @@ account keys are disabled on purpose.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -57,6 +59,19 @@ def _blob_service(account: str):  # pragma: no cover - exercised against real Az
 
 def _container(account: str, container: str):
     return _blob_service(account).get_container_client(container)
+
+
+def sha256_file(path: Path | str, chunk: int = 1 << 20) -> str:
+    """SHA-256 of a file, used to pin model artifacts (supply-chain integrity)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(chunk), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+class IntegrityError(RuntimeError):
+    """Model artifact does not match its recorded digest or has not passed the security scan."""
 
 
 def read_bytes_uri(uri: str) -> bytes:

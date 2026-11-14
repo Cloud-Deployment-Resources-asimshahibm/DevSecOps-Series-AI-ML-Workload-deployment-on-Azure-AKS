@@ -1,5 +1,6 @@
 image:
-  tag: "bootstrap" # updated only by the promote-to-prod PR
+  tag: "bootstrap"
+  digest: "" # updated only by the promote-to-prod PR
 
 replicaCount: 3
 
@@ -23,3 +24,6 @@ autoscaling:
 
 podDisruptionBudget:
   minAvailable: 2
+
+security:
+  enableDocs: false

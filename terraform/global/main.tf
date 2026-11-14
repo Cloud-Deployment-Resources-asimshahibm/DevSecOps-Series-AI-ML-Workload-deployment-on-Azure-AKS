@@ -8,6 +8,7 @@
 #   - GitHub Actions -> Azure via OIDC: three user-assigned managed identities
 #     with federated credentials (no client secrets anywhere)
 #   - Subscription cost anomaly alert
+#   - DevSecOps: security baseline (Defender for Cloud, CIS policy, activity log)
 ################################################################################
 
 data "azurerm_client_config" "current" {}
@@ -34,17 +35,20 @@ resource "azurerm_resource_group" "global" {
 # Terraform state
 # ------------------------------------------------------------------------------
 resource "azurerm_storage_account" "tfstate" {
-  name                            = "${var.project}tfstate${local.suffix}"
-  resource_group_name             = azurerm_resource_group.global.name
-  location                        = azurerm_resource_group.global.location
-  account_tier                    = "Standard"
-  account_replication_type        = "ZRS"
-  account_kind                    = "StorageV2"
-  min_tls_version                 = "TLS1_2"
-  https_traffic_only_enabled      = true
-  shared_access_key_enabled       = false # Entra ID (RBAC) only
-  default_to_oauth_authentication = true
-  allow_nested_items_to_be_public = false
+  name                              = "${var.project}tfstate${local.suffix}"
+  resource_group_name               = azurerm_resource_group.global.name
+  location                          = azurerm_resource_group.global.location
+  account_tier                      = "Standard"
+  account_replication_type          = "ZRS"
+  account_kind                      = "StorageV2"
+  min_tls_version                   = "TLS1_2"
+  https_traffic_only_enabled        = true
+  shared_access_key_enabled         = false # Entra ID (RBAC) only
+  default_to_oauth_authentication   = true
+  allow_nested_items_to_be_public   = false
+  infrastructure_encryption_enabled = true # double encryption at rest (state holds generated passwords)
+  cross_tenant_replication_enabled  = false
+  local_user_enabled                = false # no SFTP/local users
 
   blob_properties {
     versioning_enabled = true
@@ -57,6 +61,21 @@ resource "azurerm_storage_account" "tfstate" {
   }
 
   tags = local.tags
+}
+
+# who read / wrote Terraform state, and when
+resource "azurerm_monitor_diagnostic_setting" "tfstate" {
+  name                           = "state-access-audit"
+  target_resource_id             = "${azurerm_storage_account.tfstate.id}/blobServices/default"
+  log_analytics_workspace_id     = module.security_baseline.security_workspace_id
+  log_analytics_destination_type = "Dedicated"
+
+  dynamic "enabled_log" {
+    for_each = ["StorageRead", "StorageWrite", "StorageDelete"]
+    content {
+      category = enabled_log.value
+    }
+  }
 }
 
 resource "azurerm_storage_container" "tfstate" {
@@ -81,7 +100,12 @@ resource "azurerm_container_registry" "this" {
   location            = azurerm_resource_group.global.location
   sku                 = var.acr_sku
   admin_enabled       = false # pulls via kubelet identity, pushes via GitHub OIDC
-  tags                = local.tags
+  # Premium: untagged manifests (superseded digests) are purged after 7 days;
+  # signed digests stay referenced by tags / GitOps.
+  retention_policy_in_days = 7    # Premium
+  zone_redundancy_enabled  = true # Premium
+  data_endpoint_enabled    = true # Premium: regional data endpoints (firewall-friendly)
+  tags                     = local.tags
 }
 
 # ------------------------------------------------------------------------------
@@ -112,4 +136,19 @@ resource "azurerm_cost_anomaly_alert" "this" {
   subscription_id = data.azurerm_subscription.current.id
   email_subject   = "[${var.project}] Azure cost anomaly detected"
   email_addresses = var.billing_alert_emails
+}
+
+# ------------------------------------------------------------------------------
+# DevSecOps: subscription security baseline
+# ------------------------------------------------------------------------------
+module "security_baseline" {
+  source = "../modules/security-baseline"
+
+  project                = var.project
+  location               = var.location
+  resource_group         = azurerm_resource_group.global.name
+  subscription_id        = data.azurerm_subscription.current.id
+  security_contact_email = var.security_contact_email
+  services               = var.security_services
+  tags                   = local.tags
 }

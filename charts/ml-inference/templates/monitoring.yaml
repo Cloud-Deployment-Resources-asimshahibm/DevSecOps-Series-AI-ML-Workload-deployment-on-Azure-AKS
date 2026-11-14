@@ -40,7 +40,7 @@ spec:
           labels: { severity: critical, team: ml-platform }
           annotations:
             summary: "ml-inference 5xx ratio above {{ mul .Values.metrics.prometheusRule.errorRatio 100 }}%"
-            runbook_url: https://github.com/Cloud-Deployment-Resources-asimshahibm/DevOps-Series-AI-ML-Workload-deployment-on-Azure-AKS/blob/main/docs/RUNBOOK.md#ops-high-error-rate
+            runbook_url: https://github.com/Cloud-Deployment-Resources-asimshahibm/DevSecOps-Series-AI-ML-Workload-deployment-on-Azure-AKS/blob/main/docs/RUNBOOK.md#ops-high-error-rate
         - alert: MLInferenceHighLatency
           expr: mlserve:request_latency_p95:5m > {{ .Values.metrics.prometheusRule.latencyP95Seconds }}
           for: 10m
@@ -53,7 +53,7 @@ spec:
           labels: { severity: critical, team: ml-platform }
           annotations:
             summary: "At least one ml-inference replica has no model loaded"
-            description: "Check that the training pipeline promoted a model (latest.json) and IRSA access to S3."
+            description: "Check that the training pipeline promoted a model (latest.json) and Workload ID access to the Blob models container."
         - alert: MLInferenceModelLoadFailures
           expr: increase(mlserve_model_load_failures_total{ {{ $sel }} }[15m]) > 3
           labels: { severity: warning, team: ml-platform }
