@@ -90,7 +90,7 @@ jobs:
 
       # ---------------- BUILD (local only — nothing leaves the runner before it passes the scans)
       - name: Build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ml
           file: ${{ matrix.dockerfile }}
@@ -130,7 +130,7 @@ jobs:
       # ---------------- RELEASE: push, SBOM, sign, attest
       - name: Push
         id: push
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: ml
           file: ${{ matrix.dockerfile }}
