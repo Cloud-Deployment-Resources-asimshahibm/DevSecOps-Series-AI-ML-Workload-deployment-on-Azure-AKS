@@ -161,7 +161,7 @@ jobs:
           output_format: cli,sarif
           output_file_path: console,checkov.sarif
       - name: Trivy config (Terraform, Dockerfiles, K8s) — HIGH/CRITICAL block
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           version: v0.76.1
           scan-type: config
