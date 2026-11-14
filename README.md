@@ -1,4 +1,4 @@
-# DevSecOps-Series (AI/ML Workload Deployment on Kubernetes — AWS-EKS and Azure-AKS Platforms)
+# DevSecOps-Series (AI/ML Workload Deployment on Kubernetes — Azure-AKS Platform)
 
 **Terraform · Azure Kubernetes Service (AKS) · node auto-provisioning (CPU + GPU) · GitHub Actions (OIDC) · Argo CD + Helm · JupyterHub · Argo Workflows · Ray/KubeRay · Prometheus · Grafana · Loki · ELK · OpenCost · SLO error budgets**
 **+ Security at every stage:** gitleaks · Semgrep · Bandit · CodeQL · pip-audit · OSV · Checkov · Trivy · Grype · Conftest/OPA · Kyverno · zizmor · hadolint · Syft SBOM · cosign (Sigstore) · SLSA provenance · ModelScan · OWASP ZAP · Falco · Trivy Operator · Application Gateway WAF · AKS KMS (HSM key) · Microsoft Defender for Cloud · Azure Policy · Log Analytics audit
